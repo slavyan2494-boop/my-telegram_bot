@@ -20,10 +20,10 @@ ADMIN_ID = int(os.getenv("ADMIN_ID"))
 PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", -1003310607267))  # -100... по умолчанию
 
-PRICE = 199
+PRICE = 699
 ORIGINAL_PRICE = 990
 PDF_PATH = "guide.pdf"
-MAX_QUESTIONS_PER_DAY = 25
+MAX_QUESTIONS_PER_DAY = 3
 
 # Проверка файла
 print("🔧 Текущая папка:", os.getcwd())
