@@ -8,11 +8,11 @@ import os
 import pickle
 from datetime import datetime, timedelta
 from calendar import monthrange
-
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, FSInputFile
-
+from fastapi import FastAPI
+from uvicorn import Server, Config
 # ================= НАСТРОЙКИ =================
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
