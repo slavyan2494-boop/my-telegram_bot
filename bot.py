@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 # -*- coding: utf-8 -*-
 from dotenv import load_dotenv
 load_dotenv()
@@ -496,7 +496,7 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Бот остановлен вручную")
-=======
+
 # -*- coding: utf-8 -*-
 import sys
 import asyncio
@@ -992,4 +992,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("Бот остановлен вручную")
->>>>>>> 8b44225ee0cd13e6699f329b23efd0f4bff6a15a
