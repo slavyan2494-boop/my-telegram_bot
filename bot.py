@@ -13,6 +13,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, FSInputFile
 from fastapi import FastAPI
 from uvicorn import Server, Config
+
 # ================= НАСТРОЙКИ =================
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
@@ -491,7 +492,7 @@ def root():
     return {"status": "Telegram bot is running"}
 
 async def run_server():
-    config = Config(web_app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    config = Config(web_app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
     server = Server(config)
     await server.serve()
 # ================= ЗАПУСК =================
@@ -503,7 +504,7 @@ async def main():
         print(f"❌ Ошибка подключения: {e}")
         return
 
-    # Запускаем веб-сервер и бота параллельно
+    # Запускаем бота и веб-сервер одновременно
     await asyncio.gather(
         dp.start_polling(bot),
         run_server()
