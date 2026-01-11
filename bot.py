@@ -509,3 +509,6 @@ async def main():
         dp.start_polling(bot),
         run_server()
     )
+
+if __name__ == "__main__":
+    asyncio.run(main())
