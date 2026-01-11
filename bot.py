@@ -480,6 +480,20 @@ async def funnel_reminder(user_id: int):
         if user_id in active_tasks:
             del active_tasks[user_id]
 
+# ================= HTTP SERVER ДЛЯ RENDER =================
+from fastapi import FastAPI
+from uvicorn import Server, Config
+
+web_app = FastAPI()
+
+@web_app.get("/")
+def root():
+    return {"status": "Telegram bot is running"}
+
+async def run_server():
+    config = Config(web_app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+    server = Server(config)
+    await server.serve()
 # ================= ЗАПУСК =================
 async def main():
     try:
@@ -489,10 +503,8 @@ async def main():
         print(f"❌ Ошибка подключения: {e}")
         return
 
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Бот остановлен вручную")
+    # Запускаем веб-сервер и бота параллельно
+    await asyncio.gather(
+        dp.start_polling(bot),
+        run_server()
+    )
