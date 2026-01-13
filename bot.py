@@ -4,22 +4,23 @@ load_dotenv()
 
 import asyncio
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 from calendar import monthrange
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, FSInputFile
 from fastapi import FastAPI
 from uvicorn import Server, Config
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError, TelegramForbiddenError
 import aiosqlite
 
 # ================= НАСТРОЙКИ =================
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", -1003310607267))
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", "-1003310607267"))  # default as str
 
-PRICE = 100  # ⚠️ Временно для теста (избегаем CURRENCY_TOTAL_AMOUNT_INVALID)
+PRICE = 100
 ORIGINAL_PRICE = 1990
 PDF_PATH = "guide.pdf"
 MAX_QUESTIONS_PER_DAY = 3
@@ -37,6 +38,11 @@ else:
 # ================= ИНИЦИАЛИЗАЦИЯ =================
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
+
+# ================= ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ =================
+awaiting_question = set()      # Кто вводит вопрос
+user_states = {}               # Тип вопроса (urgent/normal)
+active_tasks = {}              # Активные фоновые задачи
 
 # ================= БАЗА ДАННЫХ (SQLite) =================
 async def init_db():
@@ -156,28 +162,19 @@ async def start(message: types.Message):
 async def cmd_whoami(message: types.Message):
     try:
         await message.answer(f"Ваш ID: <code>{message.from_user.id}</code>", parse_mode="HTML")
-    except:
-        pass
+    except (TelegramBadRequest, TelegramNetworkError):
+        pass  # Игнорируем ошибки отправки
 
 # ================= ПОДПИСКА =================
-@dp.callback_query(F.data == "show_subscribe")
-async def show_subscribe(callback: types.CallbackQuery):
-    await callback.message.edit_text(
-        "Чтобы продолжить, подпишись на канал 👇",
-        reply_markup=subscribe_keyboard
-    )
-    await callback.answer()
-
 @dp.callback_query(F.data == "check_sub")
 async def check_sub(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-
     try:
         member = await bot.get_chat_member(CHANNEL_ID, user_id)
         if member.status not in ("member", "administrator", "creator"):
             await callback.answer("❌ Нет подписки", show_alert=True)
             return
-    except:
+    except (TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError):
         await callback.answer("⚠️ Ошибка проверки", show_alert=True)
         return
 
@@ -292,29 +289,27 @@ async def success(message: types.Message):
         await increment_sales_count()
         new_count = await get_sales_count()
 
-        # 📢 Отправляем отчёт админу
-        await bot.send_message(
-            ADMIN_ID,
-            f"🎉 <b>Новая продажа!</b>\n\n"
-            f"🔢 Номер: <b>#{new_count}</b>\n"
-            f"👤 Пользователь: <code>{user_id}</code>\n"
-            f"🕒 Время: {datetime.now().strftime('%H:%M %d.%m')}",
-            parse_mode="HTML"
-        )
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"🎉 <b>Новая продажа!</b>\n\n"
+                f"🔢 Номер: <b>#{new_count}</b>\n"
+                f"👤 Пользователь: <code>{user_id}</code>\n"
+                f"🕒 Время: {datetime.now().strftime('%H:%M %d.%m')}",
+                parse_mode="HTML"
+            )
+        except (TelegramBadRequest, TelegramNetworkError, TelegramForbiddenError):
+            print(f"[ALERT] Не удалось отправить отчёт админу о продаже #{new_count}")
 
     await message.answer("🎉 Оплата прошла успешно!")
     await message.answer_document(document=FSInputFile(PDF_PATH))
-
     await asyncio.sleep(2)
     await message.answer(
-        "<b>🎉 Поздравляю — ты в деле!</b>\n"
-        "<b>Ты сделал шаг, о котором другие только мечтают.</b>\n\n"
-        "📌 <b>Что дальше:</b>\n"
-        "1️⃣ Прочитай гайд полностью\n"
+        "🎉 Поздравляю — ты в деле!\n\n"
+        "📌 Как получить результат:\n\n"
+        "1️⃣ Прочитай гайд целиком\n"
         "2️⃣ Выбери одну идею\n"
-        "3️⃣ Сделай первый шаг — сегодня\n\n"
-        "Ты уже начал.\n"
-        "Продолжай — и получишь результат. 💪",
+        "3️⃣ Сделай первый шаг — уже сегодня",
         parse_mode="HTML"
     )
 
@@ -409,12 +404,11 @@ async def handle_admin_reply(message: types.Message):
 
     except ValueError:
         await message.answer("❌ ID должно быть числом")
-    except Exception as e:
-        error = str(e)
-        if "blocked" in error.lower():
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
+        if "blocked" in str(e).lower():
             await message.answer("🚫 Пользователь заблокировал бота")
         else:
-            await message.answer(f"❌ Ошибка: {e}")
+            await message.answer("❌ Ошибка при отправке ответа")
 
 # === Вопрос от пользователя ===
 async def handle_user_question(message: types.Message):
@@ -448,7 +442,7 @@ async def handle_user_question(message: types.Message):
             "❗️ Не удаляй чат с ботом — иначе не получишь ответ.",
             reply_markup=main_menu
         )
-    except Exception as e:
+    except (TelegramBadRequest, TelegramNetworkError):
         await message.answer(
             "❌ Не удалось отправить вопрос.\n"
             "Попробуй позже или напиши: @knopesh",
@@ -473,8 +467,6 @@ async def back_to_menu(callback: types.CallbackQuery):
     await callback.answer()
 
 # ================= ВОРОНКА =================
-active_tasks = {}
-
 async def funnel_reminder(user_id: int):
     try:
         await asyncio.sleep(3600)
@@ -495,8 +487,8 @@ async def funnel_reminder(user_id: int):
                 "🔥 Последний шанс взять гайд по минимальной цене.",
                 reply_markup=buy_button_with_back
             )
-    except:
-        pass
+    except (TelegramBadRequest, TelegramNetworkError, TelegramForbiddenError) as e:
+        print(f"[FUNNEL] Ошибка напоминания: {e}")
     finally:
         if user_id in active_tasks:
             del active_tasks[user_id]
@@ -509,7 +501,8 @@ def root():
     return {"status": "Telegram bot is running"}
 
 async def run_server():
-    config = Config(web_app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+    port = int(os.getenv("PORT", "10000"))  # ✅ default as str
+    config = Config(web_app, host="0.0.0.0", port=port)
     server = Server(config)
     await server.serve()
 
@@ -519,8 +512,8 @@ async def main():
     try:
         await bot.get_me()
         print("✅ Бот запущен и готов к работе")
-    except Exception as e:
-        print(f"❌ Ошибка подключения: {e}")
+    except (TelegramNetworkError, TelegramBadRequest) as e:
+        print(f"❌ Ошибка подключения к Telegram: {e}")
         return
 
     await asyncio.gather(
