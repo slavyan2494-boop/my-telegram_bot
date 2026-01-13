@@ -1,11 +1,9 @@
-
 # -*- coding: utf-8 -*-
 from dotenv import load_dotenv
 load_dotenv()
-import sys
+
 import asyncio
 import os
-import pickle
 from datetime import datetime, timedelta
 from calendar import monthrange
 from aiogram import Bot, Dispatcher, types, F
@@ -13,17 +11,19 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice, FSInputFile
 from fastapi import FastAPI
 from uvicorn import Server, Config
+import aiosqlite
 
 # ================= НАСТРОЙКИ =================
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID", -1003310607267))  # -100... по умолчанию
+CHANNEL_ID = int(os.getenv("CHANNEL_ID", -1003310607267))
 
-PRICE = 699
-ORIGINAL_PRICE = 990
+PRICE = 100  # ⚠️ Временно для теста (избегаем CURRENCY_TOTAL_AMOUNT_INVALID)
+ORIGINAL_PRICE = 1990
 PDF_PATH = "guide.pdf"
 MAX_QUESTIONS_PER_DAY = 3
+DB_PATH = "bot.db"
 
 # Проверка файла
 print("🔧 Текущая папка:", os.getcwd())
@@ -38,47 +38,75 @@ else:
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ================= ХРАНИЛИЩА =================
-def load_set(filename):
-    try:
-        with open(filename, "rb") as f:
-            return set(pickle.load(f))
-    except:
-        return set()
+# ================= БАЗА ДАННЫХ (SQLite) =================
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                is_paid INTEGER DEFAULT 0,
+                first_seen TEXT
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS questions (
+                user_id INTEGER,
+                date TEXT,
+                count INTEGER,
+                PRIMARY KEY (user_id, date)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS stats (
+                key TEXT PRIMARY KEY,
+                value INTEGER
+            )
+        """)
+        await db.execute("INSERT OR IGNORE INTO stats (key, value) VALUES ('sales_count', 15)")
+        await db.commit()
 
-def save_set(data, filename):
-    with open(filename, "wb") as f:
-        pickle.dump(list(data), f)
+async def is_user_paid(user_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT is_paid FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return bool(row[0]) if row else False
 
-def load_int(filename, default=0):
-    try:
-        with open(filename, "rb") as f:
-            return pickle.load(f)
-    except:
-        return default
+async def mark_user_as_paid(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO users (user_id, is_paid, first_seen) VALUES (?, 1, datetime('now')) "
+            "ON CONFLICT(user_id) DO UPDATE SET is_paid = 1",
+            (user_id,)
+        )
+        await db.commit()
 
-def save_int(value, filename):
-    with open(filename, "wb") as f:
-        pickle.dump(value, f)
+async def get_sales_count() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT value FROM stats WHERE key = 'sales_count'") as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
-def load_questions_db():
-    try:
-        with open("questions_db.pkl", "rb") as f:
-            return pickle.load(f)
-    except:
-        return {}
+async def increment_sales_count():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE stats SET value = value + 1 WHERE key = 'sales_count'")
+        await db.commit()
 
-def save_questions_db():
-    with open("questions_db.pkl", "wb") as f:
-        pickle.dump(questions_db, f)
+async def save_question_count(user_id: int, count: int):
+    now = datetime.now().strftime("%Y-%m-%d")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO questions (user_id, date, count) VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id, date) DO UPDATE SET count = ?",
+            (user_id, now, count, count)
+        )
+        await db.commit()
 
-# Глобальные переменные
-paid_users = load_set("paid_users.pkl")
-sales_count = load_int("sales_count.pkl", 15)
-questions_db = load_questions_db()
-awaiting_question = set()
-user_states = {}
-active_tasks = {}
+async def get_question_count(user_id: int) -> int:
+    now = datetime.now().strftime("%Y-%m-%d")
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT count FROM questions WHERE user_id = ? AND date = ?", (user_id, now)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
 
 # ================= КНОПКИ =================
 subscribe_keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -157,13 +185,15 @@ async def check_sub(callback: types.CallbackQuery):
     last_day = monthrange(now.year, now.month)[1]
     end_date = f"{last_day} {['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'][now.month-1]}"
 
-    await callback.message.edit_text(
-        f"✅ Подписка подтверждена!\n\n"
-        f"⏳ Скидка действует до {end_date}\n\n"
-        "⚠️ Если ты ничего не изменишь — через год будешь в той же точке.\n\n"
-        "Этот гайд — не мотивация. Это шаги.",
-        reply_markup=main_menu
+    text = (
+        f"✅ <b>Привет, ты в деле! Подписка подтверждена 🎉</b>\n\n"
+        f"⏳ Скидка действует до {end_date} — <u>успей купить по минимальной цене</u>\n\n"
+        f"⚠️ Если ты ничего не изменишь — через год будешь в той же точке.\n\n"
+        f"📘 Этот гайд — не мотивация.\n"
+        f"Это пошаговая инструкция как сделать и запустить\n"
+        f"Ты просто следуешь — и получаешь результат."
     )
+    await callback.message.edit_text(text, reply_markup=main_menu, parse_mode="HTML")
 
     if user_id not in active_tasks:
         task = asyncio.create_task(funnel_reminder(user_id))
@@ -177,37 +207,37 @@ async def about_guide(callback: types.CallbackQuery):
     text = (
         "📘 <b>О гайде: «Цифровой продукт с нуля»</b>\n\n"
         "Этот гайд — пошаговая инструкция для запуска первого цифрового продукта в Telegram.\n\n"
-        "📌 Что внутри:\n"
-        "✅ Как найти идею без опросов и спама\n"
-        "✅ Упаковка: название, обложка, описание\n"
-        "✅ Продажи без аудитории — 3 рабочих способа\n"
-        "✅ Автоматизация: бот, ссылки, воронка\n"
-        "✅ Чек-лист «7 дней до первой продажи»\n\n"
-        "🚀 Подходит для новичков. Никакой воды — только действия."
+        "📌 <b>Что внутри:</b>\n\n"
+        "• — План и упаковка идеи\n"
+        "• — Как это продавать\n"
+        "• — Создание контента\n"
+        "• — Дизайн и финальный PDF\n"
+        "• — Магазин и платежи\n"
+        "• — Настройка автоматизации\n"
+        "• — Цена и первые клиенты\n"
+        "• — Презентация и отзывы\n"
+        "• — Работа с покупателями\n"
+        "• — Итоги и планы на месяц\n\n"
+        "🚀 <b>Подходит для новичков. Никакой воды — только действия.</b>"
     )
     await callback.message.edit_text(text, reply_markup=about_back_button, parse_mode="HTML")
     await callback.answer()
 
-# ================= FAQ — ЧАСТЫЕ ВОПРОСЫ =================
+# ================= FAQ =================
 @dp.callback_query(F.data == "faq")
 async def show_faq(callback: types.CallbackQuery):
     faq_text = (
         "📘 <b>Частые вопросы</b>\n\n"
-
         "🔸 <b>Что входит в гайд?</b>\n"
         "Полная инструкция: как найти идею, упаковать продукт, запустить продажи и автоматизировать процесс — без аудитории и бюджета.\n\n"
-
         "🔸 <b>Как получить гайд после оплаты?</b>\n"
         "После оплаты бот пришлёт файл автоматически.\n\n"
-
         "🔸 <b>Что, если я не разберусь?</b>\n"
         "Ты можешь задать мне любой вопрос — я отвечу в течение 24 часов.\n\n"
-
         "🔸 <b>Можно ли вернуть деньги?</b>\n"
         "К сожалению, возврат невозможен, так как это цифровой продукт.\n\n"
-
-        "🔸 <b>Как часто обновляется гайд?</b>\n"
-        "Обновления отправляются автоматически всем покупателям раз в месяц."
+        "🔸 <b>Сколько в среднем нужно времени на первый результат?</b>\n"
+        "Кто приобрел и следует гайду, получают первые заявки или продажи в течение 1-2 недель. Скорость зависит от твоего вовлечения. Главное — начать по четкому плану."
     )
     await callback.message.edit_text(faq_text, reply_markup=back_to_menu_button, parse_mode="HTML")
     await callback.answer()
@@ -219,6 +249,7 @@ async def buy(callback: types.CallbackQuery):
     now = datetime.now()
     last_day = monthrange(now.year, now.month)[1]
     end_date = f"{last_day} {['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'][now.month-1]}"
+    sales_count = await get_sales_count()
 
     text = (
         "📘 <b>Гайд: Цифровой продукт с нуля</b>\n\n"
@@ -227,7 +258,7 @@ async def buy(callback: types.CallbackQuery):
         "— Без опыта\n\n"
         f"🔥 Купили: <b>{sales_count} раз</b>\n\n"
         f"💸 Цена до {end_date}: <b>{PRICE} ₽</b>\n"
-        f"❌ Обычная: <s>{ORIGINAL_PRICE} ₽</s>\n\n"
+        f"❌ Обычная: <s><b>{ORIGINAL_PRICE} ₽</b></s>\n\n"
         f"Оплачивая, вы соглашаетесь с публичной <a href='{offer_url}'>офертой</a>."
     )
     await callback.message.edit_text(text, reply_markup=buy_button_with_back, parse_mode="HTML")
@@ -254,24 +285,36 @@ async def pre_checkout(pre: types.PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def success(message: types.Message):
-    global sales_count
     user_id = message.from_user.id
 
-    if user_id not in paid_users:
-        paid_users.add(user_id)
-        save_set(paid_users, "paid_users.pkl")
-        sales_count += 1
-        save_int(sales_count, "sales_count.pkl")
+    if not await is_user_paid(user_id):
+        await mark_user_as_paid(user_id)
+        await increment_sales_count()
+        new_count = await get_sales_count()
+
+        # 📢 Отправляем отчёт админу
+        await bot.send_message(
+            ADMIN_ID,
+            f"🎉 <b>Новая продажа!</b>\n\n"
+            f"🔢 Номер: <b>#{new_count}</b>\n"
+            f"👤 Пользователь: <code>{user_id}</code>\n"
+            f"🕒 Время: {datetime.now().strftime('%H:%M %d.%m')}",
+            parse_mode="HTML"
+        )
 
     await message.answer("🎉 Оплата прошла успешно!")
-    await message.answer_document(document=FSInputFile(PDF_PATH), caption="📘 Твой гайд")
+    await message.answer_document(document=FSInputFile(PDF_PATH))
 
     await asyncio.sleep(2)
     await message.answer(
-        "<b>📌 Как использовать гайд</b>\n\n"
-        "1️⃣ Прочитай полностью\n"
+        "<b>🎉 Поздравляю — ты в деле!</b>\n"
+        "<b>Ты сделал шаг, о котором другие только мечтают.</b>\n\n"
+        "📌 <b>Что дальше:</b>\n"
+        "1️⃣ Прочитай гайд полностью\n"
         "2️⃣ Выбери одну идею\n"
-        "3️⃣ Сделай первый шаг",
+        "3️⃣ Сделай первый шаг — сегодня\n\n"
+        "Ты уже начал.\n"
+        "Продолжай — и получишь результат. 💪",
         parse_mode="HTML"
     )
 
@@ -279,10 +322,7 @@ async def success(message: types.Message):
 @dp.callback_query(F.data == "ask_question")
 async def ask_question(callback: types.CallbackQuery):
     user_id = callback.from_user.id
-    now = datetime.now()
-    today_str = now.strftime("%Y-%m-%d")
-    user_data = questions_db.get(user_id)
-    used = user_data["count"] if user_data and user_data["date"] == today_str else 0
+    used = await get_question_count(user_id)
     remaining = MAX_QUESTIONS_PER_DAY - used
 
     if remaining <= 0:
@@ -313,26 +353,19 @@ async def ask_urgent(callback: types.CallbackQuery):
 
 async def set_awaiting_question(callback: types.CallbackQuery, urgent: bool):
     user_id = callback.from_user.id
-    now = datetime.now()
-    today_str = now.strftime("%Y-%m-%d")
+    used = await get_question_count(user_id)
 
-    user_data = questions_db.get(user_id)
-
-    if user_data and user_data["date"] == today_str:
-        if user_data["count"] >= MAX_QUESTIONS_PER_DAY:
-            await callback.message.edit_text(
-                "⏳ Ты уже задал 3 вопроса сегодня.\nМожно снова завтра.",
-                reply_markup=about_back_button
-            )
-            await callback.answer()
-            return
-        user_data["count"] += 1
-    else:
-        questions_db[user_id] = {"date": today_str, "count": 1}
+    if used >= MAX_QUESTIONS_PER_DAY:
+        await callback.message.edit_text(
+            "⏳ Ты уже задал 3 вопроса сегодня.\nМожно снова завтра.",
+            reply_markup=about_back_button
+        )
+        await callback.answer()
+        return
 
     awaiting_question.add(user_id)
     user_states[user_id] = "urgent" if urgent else "normal"
-    save_questions_db()
+    await save_question_count(user_id, used + 1)
 
     await callback.message.edit_text(
         "💬 Напиши свой вопрос текстом.\n"
@@ -341,65 +374,51 @@ async def set_awaiting_question(callback: types.CallbackQuery, urgent: bool):
     )
     await callback.answer()
 
-# ================= ОБРАБОТКА ВСЕХ СООБЩЕНИЙ =================
+# ================= ОБРАБОТКА СООБЩЕНИЙ =================
 @dp.message(F.text)
 async def handle_all_text(message: types.Message):
     text = message.text.strip()
     user_id = message.from_user.id
 
-    print(f"[DEBUG] Получено: {repr(text)} от {user_id}")
-
-    # === 1. Обработка /reply от админа ===
     if user_id == ADMIN_ID and text.startswith("/reply"):
         await handle_admin_reply(message)
         return
 
-    # === 2. Обработка текста вопроса от пользователя ===
     if user_id in awaiting_question:
         await handle_user_question(message)
         return
 
-# === Функция: ответ от админа ===
+# === Ответ от админа ===
 async def handle_admin_reply(message: types.Message):
     text = message.text.strip()
     try:
         parts = text.split(maxsplit=2)
         if len(parts) < 3:
             await message.answer("❌ Формат: /reply ID Текст")
-            print("[REPLY] Ошибка: недостаточно аргументов")
             return
 
         target_id = int(parts[1])
         reply_text = parts[2]
-
-        print(f"[REPLY] Ответ на {target_id}: {reply_text}")
 
         await bot.send_message(
             chat_id=target_id,
             text=f"<b>📬 Ответ от автора:</b>\n\n{reply_text}",
             parse_mode="HTML"
         )
-        await message.answer(
-            f"✅ Ответ отправлен: <code>{target_id}</code>",
-            parse_mode="HTML"
-        )
-        print(f"[REPLY] Успешно отправлено {target_id}")
+        await message.answer(f"✅ Ответ отправлен: <code>{target_id}</code>", parse_mode="HTML")
 
     except ValueError:
         await message.answer("❌ ID должно быть числом")
-        print("[REPLY] Ошибка: неверный формат ID")
     except Exception as e:
         error = str(e)
-        print(f"[REPLY] Ошибка: {error}")
         if "blocked" in error.lower():
             await message.answer("🚫 Пользователь заблокировал бота")
         else:
             await message.answer(f"❌ Ошибка: {e}")
 
-# === Функция: вопрос от пользователя ===
+# === Вопрос от пользователя ===
 async def handle_user_question(message: types.Message):
     user_id = message.from_user.id
-    now = datetime.now()
     state = user_states.pop(user_id, "normal")
     is_urgent = state == "urgent"
     awaiting_question.discard(user_id)
@@ -418,7 +437,7 @@ async def handle_user_question(message: types.Message):
         f"{message.text}\n\n"
         f"📩 Чтобы ответить — введи:\n"
         f"<code>/reply {user_id} Текст ответа</code>\n\n"
-        f"⏰ {now.strftime('%H:%M %d.%m')}"
+        f"⏰ {datetime.now().strftime('%H:%M %d.%m')}"
     )
 
     try:
@@ -429,14 +448,12 @@ async def handle_user_question(message: types.Message):
             "❗️ Не удаляй чат с ботом — иначе не получишь ответ.",
             reply_markup=main_menu
         )
-        print(f"[QUESTION] Вопрос от {user_id} отправлен")
     except Exception as e:
         await message.answer(
             "❌ Не удалось отправить вопрос.\n"
             "Попробуй позже или напиши: @knopesh",
             reply_markup=main_menu
         )
-        print(f"[ERROR] Ошибка отправки вопроса от {user_id}: {e}")
 
 # ================= НАЗАД В МЕНЮ =================
 @dp.callback_query(F.data == "back_to_menu")
@@ -444,21 +461,24 @@ async def back_to_menu(callback: types.CallbackQuery):
     now = datetime.now()
     last_day = monthrange(now.year, now.month)[1]
     end_date = f"{last_day} {['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'][now.month-1]}"
+    sales_count = await get_sales_count()
 
     text = (
-        f"🔥 <b>{sales_count}+</b> человек уже запустили свой путь\n\n"
-        f"⏳ Скидка действует до {end_date}\n\n"
-        "🚀 А ты?\n"
-        "Выбери, что хочешь сделать:"
+        f"🔥 <b>{sales_count}</b> единомышленников уже в деле\n\n"
+        "🚀 Твое время - сделать шаг\n\n"
+        f"⏳ <i>Спеццена ждет тебя до {end_date}</i>\n\n"
+        "<b>Выбери, что хочешь сделать:</b> 👇🏻"
     )
     await callback.message.edit_text(text, reply_markup=main_menu, parse_mode="HTML")
     await callback.answer()
 
 # ================= ВОРОНКА =================
+active_tasks = {}
+
 async def funnel_reminder(user_id: int):
     try:
         await asyncio.sleep(3600)
-        if user_id not in paid_users:
+        if not await is_user_paid(user_id):
             now = datetime.now()
             last_day = monthrange(now.year, now.month)[1]
             end_date = f"{last_day} {['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'][now.month-1]}"
@@ -469,7 +489,7 @@ async def funnel_reminder(user_id: int):
             )
 
         await asyncio.sleep(14400)
-        if user_id not in paid_users:
+        if not await is_user_paid(user_id):
             await bot.send_message(
                 user_id,
                 "🔥 Последний шанс взять гайд по минимальной цене.",
@@ -482,9 +502,6 @@ async def funnel_reminder(user_id: int):
             del active_tasks[user_id]
 
 # ================= HTTP SERVER ДЛЯ RENDER =================
-from fastapi import FastAPI
-from uvicorn import Server, Config
-
 web_app = FastAPI()
 
 @web_app.get("/")
@@ -495,8 +512,10 @@ async def run_server():
     config = Config(web_app, host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
     server = Server(config)
     await server.serve()
+
 # ================= ЗАПУСК =================
 async def main():
+    await init_db()
     try:
         await bot.get_me()
         print("✅ Бот запущен и готов к работе")
@@ -504,7 +523,6 @@ async def main():
         print(f"❌ Ошибка подключения: {e}")
         return
 
-    # Запускаем бота и веб-сервер одновременно
     await asyncio.gather(
         dp.start_polling(bot),
         run_server()
