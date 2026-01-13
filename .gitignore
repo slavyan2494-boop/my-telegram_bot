@@ -14,3 +14,5 @@ __pycache__
 # Системные файлы
 .DS_Store
 Thumbs.db
+
+echo "bot.db" >> .gitignore
