@@ -1,18 +1,37 @@
-# Не загружать переменные
-.env
-
-# Не загружать данные бота
-*.pkl
-
-# Не загружать CSV
-*.csv
-
-# Временные файлы Python
-__pycache__
+# Python
+__pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.pytest_cache
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pyre/
+.pytype/
 
-# Системные файлы
+# Env
+.env
+.env.local
+
+# DB
+bot.db
+
+# OS
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
-
-echo "bot.db" >> .gitignore
